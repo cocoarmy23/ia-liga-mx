@@ -13,74 +13,56 @@ supabase: Client = create_client(URL_SUPABASE, KEY_SUPABASE)
 
 st.set_page_config(page_title="IA Liga MX - Pro", layout="wide")
 
-# --- SIDEBAR: CONTROLADOR DE PRESUPUESTO ---
-st.sidebar.header("⚙️ Control de API")
-presupuesto_diario = 100
-# Simulamos un contador (Streamlit Cloud reinicia sesión, pero esto ayuda a trackear)
-if 'consultas_hoy' not in st.session_state:
-    st.session_state['consultas_hoy'] = 0
+# --- PANEL DE CONTROL ABIERTO ---
+st.title("🏆 Centro de Mando: Modelo Híbrido")
 
-consultas_restantes = presupuesto_diario - st.session_state['consultas_hoy']
-st.sidebar.metric("Consultas Restantes", f"{consultas_restantes}/100")
+st.markdown("### ⚙️ Configuración de la Agenda")
+col1, col2 = st.columns(2)
 
-modo_live = st.sidebar.toggle("Activar Modo Live (Auto-refresco)")
+with col1:
+    hora_inicio = st.number_input("Hora de Inicio (24h)", value=17, min_value=0, max_value=23)
+    presupuesto = st.slider("Presupuesto de consultas", 10, 100, 90)
+
+with col2:
+    hora_fin = st.number_input("Hora de Fin (24h)", value=23, min_value=0, max_value=23)
+    st.metric("Límite Diario API", "100/100")
+
+# Botón de Sincronización Manual
+if st.button("🔄 SINCRONIZAR AHORA (Gasta 1 consulta)"):
+    st.write("Conectando con la API...")
+    # Aquí irá la lógica de actualización que ya tenemos
+
+# Switch para el Modo Live
+modo_live = st.toggle("🚀 ACTIVAR MODO LIVE (Auto-actualización)")
+
 if modo_live:
-    intervalo = st.sidebar.slider("Refrescar cada (minutos)", 1, 15, 5)
-    from streamlit_autorefresh import st_autorefresh
-    st_autorefresh(interval=intervalo * 60 * 1000, key="auto_refresco")
+    ahora = datetime.now()
+    if hora_inicio <= ahora.hour < hora_fin:
+        # Cálculo dinámico del intervalo
+        minutos_restantes = (hora_fin - ahora.hour) * 60
+        intervalo_minutos = max(minutos_restantes / presupuesto, 1.0)
+        
+        st.success(f"Modo Live Activo. Actualizando cada {intervalo_minutos:.1f} minutos.")
+        
+        try:
+            from streamlit_autorefresh import st_autorefresh
+            st_autorefresh(interval=intervalo_minutos * 60 * 1000, key="live_v2")
+        except:
+            st.error("Error: Revisa que 'streamlit-autorefresh' esté en requirements.txt")
+    else:
+        st.info("Modo Live en espera: Fuera del horario establecido.")
 
-# --- FUNCIÓN DE ACTUALIZACIÓN ---
-def sincronizar_datos():
-    st.session_state['consultas_hoy'] += 1
-    # Traemos la última jornada de Supabase
-    res = supabase.table("predicciones").select("jornada").order("jornada", desc=True).limit(1).execute()
-    if not res.data: return
-    jor = res.data[0]['jornada']
-    
-    url = "https://v3.football.api-sports.io/fixtures"
-    headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
-    params = {"league": "262", "season": "2025", "round": f"Regular Season - {jor}"}
-    
-    try:
-        response = requests.get(url, headers=headers, params=params)
-        partidos = response.json().get('response', [])
-        for p in partidos:
-            if p['fixture']['status']['short'] == 'FT':
-                gl, gv = p['goals']['home'], p['goals']['away']
-                equipo_local = p['teams']['home']['name']
-                supabase.table("predicciones").update({"goles_l": gl, "goles_v": gv})\
-                    .ilike("local", f"%{equipo_local}%").eq("jornada", jor).execute()
-    except Exception as e:
-        st.error(f"Error de conexión: {e}")
+st.divider()
 
-# Ejecución al cargar
-if st.sidebar.button("🔄 Sincronizar Ahora"):
-    with st.spinner("Conectando con la API..."):
-        sincronizar_datos()
-
-# --- DASHBOARD PRINCIPAL ---
-st.title("🏆 Resultados Modelo Híbrido")
-
-data = supabase.table("predicciones").select("*").order("jornada", desc=True).execute()
-df = pd.DataFrame(data.data)
-
-if not df.empty:
-    for _, r in df.iterrows():
-        with st.expander(f"Jornada {r['jornada']}: {r['local']} vs {r['visitante']}", expanded=True):
-            c1, c2, c3 = st.columns(3)
-            
-            # Mostrar Marcador Real si existe
-            if pd.notnull(r['goles_l']):
-                real_l, real_v = int(r['goles_l']), int(r['goles_v'])
-                ganador_real = "Local" if real_l > real_v else ("Visitante" if real_v > real_l else "Empate")
-                es_acierto = ganador_real == r['prediccion']
-                
-                c1.metric("Resultado Real", f"{real_l} - {real_v}")
-                c2.metric("Predicción IA", r['prediccion'], delta="✅ ACERTO" if es_acierto else "❌ ERROR")
-                c3.write(f"**Marcador IA:** {r['marcador_pred']}")
-            else:
-                c1.warning("Esperando juego...")
-                c2.info(f"Predicción: {r['prediccion']}")
-                c3.write(f"Sugerido: {r['marcador_pred']}")
-else:
-    st.info("Sube tus predicciones de la Jornada 5 desde tu PC para empezar.")
+# --- VISUALIZACIÓN DE PARTIDOS ---
+st.markdown("### 📊 Predicciones Jornada 5")
+# Aquí cargamos los datos de Supabase como ya lo hacíamos
+try:
+    data = supabase.table("predicciones").select("*").order("jornada", desc=True).execute()
+    df = pd.DataFrame(data.data)
+    if not df.empty:
+        st.table(df[['jornada', 'local', 'visitante', 'prediccion', 'marcador_pred']])
+    else:
+        st.info("No hay datos de la Jornada 5 en Supabase aún.")
+except:
+    st.error("Error al conectar con la base de datos.")
