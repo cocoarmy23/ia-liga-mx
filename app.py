@@ -7,77 +7,80 @@ from datetime import datetime
 # --- CONFIGURACIÓN ---
 URL_SUPABASE = "https://xavzjoyjausutoscosaw.supabase.co"
 KEY_SUPABASE = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inhhdnpqb3lqYXVzdXRvc2Nvc2F3Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njk5NjAwNzksImV4cCI6MjA4NTUzNjA3OX0.YjHw-NVeuVpK5l4XkM3hft1vSrERRBXEWZl2wPNjZ0k"
-API_FOOTBALL_KEY = "bfac3e4f7d2d5736b2a5463f40876446369b215a1de43eb33983ce5e7ecb5779"
+API_KEY = "bfac3e4f7d2d5736b2a5463f40876446369b215a1de43eb33983ce5e7ecb5779"
 
 supabase: Client = create_client(URL_SUPABASE, KEY_SUPABASE)
 
-st.set_page_config(page_title="IA Liga MX - Live", layout="wide")
+st.set_page_config(page_title="IA Liga MX - Pro", layout="wide")
 
-# --- FUNCIÓN DE AUTO-ACTUALIZACIÓN ---
-def auto_sincronizar():
-    # Buscamos la jornada más alta que tengas en Supabase para saber qué actualizar
-    res_jornada = supabase.table("predicciones").select("jornada").order("jornada", desc=True).limit(1).execute()
-    if not res_jornada.data: return
-    
-    jornada_actual = res_jornada.data[0]['jornada']
+# --- SIDEBAR: CONTROLADOR DE PRESUPUESTO ---
+st.sidebar.header("⚙️ Control de API")
+presupuesto_diario = 100
+# Simulamos un contador (Streamlit Cloud reinicia sesión, pero esto ayuda a trackear)
+if 'consultas_hoy' not in st.session_state:
+    st.session_state['consultas_hoy'] = 0
+
+consultas_restantes = presupuesto_diario - st.session_state['consultas_hoy']
+st.sidebar.metric("Consultas Restantes", f"{consultas_restantes}/100")
+
+modo_live = st.sidebar.toggle("Activar Modo Live (Auto-refresco)")
+if modo_live:
+    intervalo = st.sidebar.slider("Refrescar cada (minutos)", 1, 15, 5)
+    from streamlit_autorefresh import st_autorefresh
+    st_autorefresh(interval=intervalo * 60 * 1000, key="auto_refresco")
+
+# --- FUNCIÓN DE ACTUALIZACIÓN ---
+def sincronizar_datos():
+    st.session_state['consultas_hoy'] += 1
+    # Traemos la última jornada de Supabase
+    res = supabase.table("predicciones").select("jornada").order("jornada", desc=True).limit(1).execute()
+    if not res.data: return
+    jor = res.data[0]['jornada']
     
     url = "https://v3.football.api-sports.io/fixtures"
-    headers = {'x-rapidapi-key': API_FOOTBALL_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
-    params = {"league": "262", "season": "2025", "round": f"Regular Season - {jornada_actual}"}
+    headers = {'x-rapidapi-key': API_KEY, 'x-rapidapi-host': 'v3.football.api-sports.io'}
+    params = {"league": "262", "season": "2025", "round": f"Regular Season - {jor}"}
     
     try:
         response = requests.get(url, headers=headers, params=params)
-        datos = response.json().get('response', [])
-        for p in datos:
+        partidos = response.json().get('response', [])
+        for p in partidos:
             if p['fixture']['status']['short'] == 'FT':
                 gl, gv = p['goals']['home'], p['goals']['away']
-                local_name = p['teams']['home']['name']
-                # Actualiza si los goles aún están vacíos
+                equipo_local = p['teams']['home']['name']
                 supabase.table("predicciones").update({"goles_l": gl, "goles_v": gv})\
-                    .ilike("local", f"%{local_name}%").eq("jornada", jornada_actual).execute()
-    except:
-        pass # Si falla la API, la app carga igual con lo que tenga
+                    .ilike("local", f"%{equipo_local}%").eq("jornada", jor).execute()
+    except Exception as e:
+        st.error(f"Error de conexión: {e}")
 
-# --- EJECUCIÓN AUTOMÁTICA AL INICIO ---
-if 'actualizado' not in st.session_state:
-    with st.spinner('Actualizando marcadores en tiempo real...'):
-        auto_sincronizar()
-        st.session_state['actualizado'] = True
+# Ejecución al cargar
+if st.sidebar.button("🔄 Sincronizar Ahora"):
+    with st.spinner("Conectando con la API..."):
+        sincronizar_datos()
 
-# --- INTERFAZ ---
-st.title("⚽ Mis Predicciones Real-Time")
+# --- DASHBOARD PRINCIPAL ---
+st.title("🏆 Resultados Modelo Híbrido")
 
-res = supabase.table("predicciones").select("*").order("jornada", desc=True).execute()
-df = pd.DataFrame(res.data)
+data = supabase.table("predicciones").select("*").order("jornada", desc=True).execute()
+df = pd.DataFrame(data.data)
 
 if not df.empty:
     for _, r in df.iterrows():
-        # Diseño de tarjeta para celular
-        with st.container():
-            st.markdown(f"### Jornada {r['jornada']}")
-            col1, col2, col3 = st.columns([2,1,2])
+        with st.expander(f"Jornada {r['jornada']}: {r['local']} vs {r['visitante']}", expanded=True):
+            c1, c2, c3 = st.columns(3)
             
-            col1.write(f"**{r['local']}**")
-            col2.write(f"VS")
-            col3.write(f"**{r['visitante']}**")
-            
-            # Comparación IA vs Realidad
-            pred = r['prediccion']
-            ia_score = r['marcador_pred']
-            
-            if pd.notnull(r.get('goles_l')):
-                real_score = f"{int(r['goles_l'])} - {int(r['goles_v'])}"
-                ganador_real = "Local" if r['goles_l'] > r['goles_v'] else ("Visitante" if r['goles_v'] > r['goles_l'] else "Empate")
+            # Mostrar Marcador Real si existe
+            if pd.notnull(r['goles_l']):
+                real_l, real_v = int(r['goles_l']), int(r['goles_v'])
+                ganador_real = "Local" if real_l > real_v else ("Visitante" if real_v > real_l else "Empate")
+                es_acierto = ganador_real == r['prediccion']
                 
-                estatus = "✅ ACERTASTE" if ganador_real == pred else "❌ FALLASTE"
-                color = "green" if ganador_real == pred else "red"
-                
-                st.markdown(f"<p style='color:{color}; font-weight:bold;'>{estatus} (Real: {real_score} | IA: {ia_score})</p>", unsafe_allow_html=True)
+                c1.metric("Resultado Real", f"{real_l} - {real_v}")
+                c2.metric("Predicción IA", r['prediccion'], delta="✅ ACERTO" if es_acierto else "❌ ERROR")
+                c3.write(f"**Marcador IA:** {r['marcador_pred']}")
             else:
-                st.info(f"IA predice: {pred} ({ia_score}) | ⏳ Esperando resultado real...")
-            st.divider()
+                c1.warning("Esperando juego...")
+                c2.info(f"Predicción: {r['prediccion']}")
+                c3.write(f"Sugerido: {r['marcador_pred']}")
 else:
-    st.warning("No hay datos. Envía predicciones desde tu PC.")
-
-if st.button("🔄 Refrescar ahora"):
-    st.rerun()
+    st.info("Sube tus predicciones de la Jornada 5 desde tu PC para empezar.")
